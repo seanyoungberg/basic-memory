@@ -185,6 +185,12 @@ async def _reindex_projects(app_config):
 @app.command()
 def reset(
     reindex: bool = typer.Option(False, "--reindex", help="Rebuild db index from filesystem"),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip the confirmation prompt (for scripted / non-interactive use).",
+    ),
     force: bool = typer.Option(
         False,
         "--force",
@@ -202,7 +208,7 @@ def reset(
         "Your markdown note files will not be affected.\n"
         "Use [green]bm reset --reindex[/green] to automatically rebuild the index afterward."
     )
-    if typer.confirm("Reset the database index?"):
+    if yes or typer.confirm("Reset the database index?"):
         # Pre-flight: refuse to proceed if MCP processes still hold the DB
         # file open. POSIX would silently let us unlink the inode while
         # they keep reading it; Windows would error here anyway. See

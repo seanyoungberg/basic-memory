@@ -59,3 +59,44 @@ def test_bm_reset_reindex_exits_cleanly(tmp_path: Path):
     )
     assert result.returncode == 0, result.stderr
     assert "Reindex complete" in result.stdout
+
+
+@skip_on_windows
+def test_bm_reset_yes_skips_prompt(tmp_path: Path):
+    """`bm reset --yes` should run non-interactively without consuming stdin.
+
+    --force pairs orthogonally to bypass the live-MCP pre-flight (#765); we're
+    verifying --yes prompt-skip semantics here, which is independent of the
+    zombie check covered in test_db_reset_zombie_check.py.
+    """
+    # Closing stdin (DEVNULL) proves the prompt was actually skipped — the
+    # original code path called typer.confirm() and would abort with EOF.
+    result = subprocess.run(
+        ["uv", "run", "bm", "reset", "--yes", "--force"],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        cwd=Path(__file__).parent.parent.parent,
+        env=_isolated_env(tmp_path),
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Database reset complete" in result.stdout
+    # Confirmation prompt text must not appear when --yes is set.
+    assert "Reset the database index?" not in result.stdout
+
+
+@skip_on_windows
+def test_bm_reset_y_short_flag_skips_prompt(tmp_path: Path):
+    """`bm reset -y` short flag should also skip the prompt."""
+    result = subprocess.run(
+        ["uv", "run", "bm", "reset", "-y", "--reindex", "--force"],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        cwd=Path(__file__).parent.parent.parent,
+        env=_isolated_env(tmp_path),
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Reindex complete" in result.stdout
