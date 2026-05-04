@@ -19,6 +19,7 @@ from basic_memory.mcp.tools import build_context as mcp_build_context
 from basic_memory.mcp.tools import edit_note as mcp_edit_note
 from basic_memory.mcp.tools import list_memory_projects as mcp_list_projects
 from basic_memory.mcp.tools import list_workspaces as mcp_list_workspaces
+from basic_memory.mcp.tools import move_note as mcp_move_note
 from basic_memory.mcp.tools import read_note as mcp_read_note
 from basic_memory.mcp.tools import recent_activity as mcp_recent_activity
 from basic_memory.mcp.tools import schema_diff as mcp_schema_diff
@@ -252,6 +253,110 @@ def edit_note(
     except Exception as e:  # pragma: no cover
         if not isinstance(e, typer.Exit):
             typer.echo(f"Error during edit_note: {e}", err=True)
+            raise typer.Exit(1)
+        raise
+
+
+@tool_app.command("move-note")
+def move_note(
+    identifier: Annotated[
+        str,
+        typer.Argument(help="Exact note identifier (title, permalink, or memory:// URL)"),
+    ],
+    destination_path: Annotated[
+        Optional[str],
+        typer.Argument(
+            help="New path relative to project root (e.g., archive/2026/old-note.md). "
+            "Mutually exclusive with --destination-folder."
+        ),
+    ] = None,
+    destination_folder: Annotated[
+        Optional[str],
+        typer.Option(
+            "--destination-folder",
+            help="Move into this folder, preserving the original filename. "
+            "Mutually exclusive with the destination_path positional argument.",
+        ),
+    ] = None,
+    is_directory: bool = typer.Option(
+        False,
+        "--directory",
+        help="Treat identifier as a directory path and move the entire subtree.",
+    ),
+    project: Annotated[
+        Optional[str],
+        typer.Option(help="The project to use. If not provided, the default project will be used."),
+    ] = None,
+    project_id: Annotated[
+        Optional[str],
+        typer.Option(
+            "--project-id",
+            help="Project external_id (UUID). Takes precedence over --project; use to disambiguate same-named projects across cloud workspaces.",
+        ),
+    ] = None,
+    local: bool = typer.Option(
+        False, "--local", help="Force local API routing (ignore cloud mode)"
+    ),
+    cloud: bool = typer.Option(False, "--cloud", help="Force cloud API routing"),
+):
+    """Move a note (or directory) to a new location, updating DB and search index.
+
+    Thin wrapper around the move_note MCP tool. Use this when you want the
+    database, search index, and permalink to update atomically — `git mv`
+    requires a separate `bm reindex` to re-sync.
+
+    Examples:
+
+    bm tool move-note "My Note" archive/2026/my-note.md
+    bm tool move-note my-note-permalink --destination-folder archive
+    bm tool move-note docs/old-tree archive/docs --directory
+    """
+    try:
+        validate_routing_flags(local, cloud)
+
+        if destination_path and destination_folder:
+            typer.echo(
+                "Error: provide either a destination path argument or --destination-folder, not both.",
+                err=True,
+            )
+            raise typer.Exit(1)
+        if not destination_path and not destination_folder:
+            typer.echo(
+                "Error: provide either a destination path argument or --destination-folder.",
+                err=True,
+            )
+            raise typer.Exit(1)
+
+        with force_routing(local=local, cloud=cloud):
+            result = run_with_cleanup(
+                mcp_move_note(
+                    identifier=identifier,
+                    destination_path=destination_path or "",
+                    destination_folder=destination_folder,
+                    is_directory=is_directory,
+                    project=project,
+                    project_id=project_id,
+                    output_format="json",
+                )
+            )
+
+        # MCP move_note returns a dict in JSON mode with `moved: bool` and an
+        # optional `error` field. Surface non-zero exit on failure so scripts
+        # can branch reliably.
+        if isinstance(result, dict) and result.get("error"):
+            _print_json(result)
+            raise typer.Exit(1)
+        if isinstance(result, dict) and result.get("moved") is False:
+            _print_json(result)
+            raise typer.Exit(1)
+
+        _print_json(result)
+    except ValueError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+    except Exception as e:  # pragma: no cover
+        if not isinstance(e, typer.Exit):
+            typer.echo(f"Error during move_note: {e}", err=True)
             raise typer.Exit(1)
         raise
 

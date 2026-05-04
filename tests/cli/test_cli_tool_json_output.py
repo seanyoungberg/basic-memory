@@ -553,6 +553,115 @@ def test_schema_validate_error_response(mock_mcp):
     assert "error" in data
 
 
+MOVE_NOTE_RESULT = {
+    "moved": True,
+    "title": "Test Note",
+    "permalink": "archive/2026/test-note",
+    "file_path": "archive/2026/test-note.md",
+    "source": "notes/test-note",
+    "destination": "archive/2026/test-note.md",
+}
+
+
+@patch(
+    "basic_memory.cli.commands.tool.mcp_move_note",
+    new_callable=AsyncMock,
+    return_value=MOVE_NOTE_RESULT,
+)
+def test_move_note_json_output(mock_mcp):
+    """move-note positional destination_path forwards to MCP tool."""
+    result = runner.invoke(
+        cli_app,
+        ["tool", "move-note", "notes/test-note", "archive/2026/test-note.md"],
+    )
+    assert result.exit_code == 0, f"CLI failed: {result.output}"
+    data = json.loads(result.output)
+    assert data["moved"] is True
+    kwargs = mock_mcp.call_args.kwargs
+    assert kwargs["identifier"] == "notes/test-note"
+    assert kwargs["destination_path"] == "archive/2026/test-note.md"
+    assert kwargs["destination_folder"] is None
+    assert kwargs["is_directory"] is False
+    assert kwargs["output_format"] == "json"
+
+
+@patch(
+    "basic_memory.cli.commands.tool.mcp_move_note",
+    new_callable=AsyncMock,
+    return_value=MOVE_NOTE_RESULT,
+)
+def test_move_note_destination_folder_flag(mock_mcp):
+    """--destination-folder forwards as destination_folder, not destination_path."""
+    result = runner.invoke(
+        cli_app,
+        ["tool", "move-note", "notes/test-note", "--destination-folder", "archive"],
+    )
+    assert result.exit_code == 0, f"CLI failed: {result.output}"
+    kwargs = mock_mcp.call_args.kwargs
+    assert kwargs["destination_folder"] == "archive"
+    # destination_path is empty when only folder is provided
+    assert kwargs["destination_path"] == ""
+
+
+@patch(
+    "basic_memory.cli.commands.tool.mcp_move_note",
+    new_callable=AsyncMock,
+)
+def test_move_note_rejects_both_destinations(mock_mcp):
+    """Providing both positional destination and --destination-folder is an error."""
+    result = runner.invoke(
+        cli_app,
+        [
+            "tool",
+            "move-note",
+            "notes/test-note",
+            "archive/test.md",
+            "--destination-folder",
+            "archive",
+        ],
+    )
+    assert result.exit_code == 1
+    assert "not both" in result.output
+    mock_mcp.assert_not_called()
+
+
+@patch(
+    "basic_memory.cli.commands.tool.mcp_move_note",
+    new_callable=AsyncMock,
+)
+def test_move_note_rejects_no_destination(mock_mcp):
+    """At least one of destination_path / --destination-folder must be provided."""
+    result = runner.invoke(cli_app, ["tool", "move-note", "notes/test-note"])
+    assert result.exit_code == 1
+    assert "destination" in result.output.lower()
+    mock_mcp.assert_not_called()
+
+
+@patch(
+    "basic_memory.cli.commands.tool.mcp_move_note",
+    new_callable=AsyncMock,
+    return_value={
+        "moved": False,
+        "title": None,
+        "permalink": None,
+        "file_path": None,
+        "source": "notes/missing",
+        "destination": "archive/x.md",
+        "error": "entity not found",
+    },
+)
+def test_move_note_failure_exit_code(mock_mcp):
+    """move-note exits non-zero when MCP returns moved=False / error field."""
+    result = runner.invoke(
+        cli_app,
+        ["tool", "move-note", "notes/missing", "archive/x.md"],
+    )
+    assert result.exit_code == 1
+    data = json.loads(result.output)
+    assert data["moved"] is False
+    assert data["error"] == "entity not found"
+
+
 def _per_file_validate_result(identifier: str) -> dict:
     """Tiny helper: minimal valid ValidationReport-shaped dict for one note."""
     return {
