@@ -553,6 +553,108 @@ def test_schema_validate_error_response(mock_mcp):
     assert "error" in data
 
 
+def _per_file_validate_result(identifier: str) -> dict:
+    """Tiny helper: minimal valid ValidationReport-shaped dict for one note."""
+    return {
+        "note_type": "task",
+        "total_notes": 1,
+        "total_entities": 1,
+        "valid_count": 1,
+        "warning_count": 0,
+        "error_count": 1,
+        "results": [
+            {
+                "note_identifier": identifier,
+                "schema_entity": "task",
+                "passed": False,
+                "warnings": [],
+                "errors": ["Missing required field: title"],
+            }
+        ],
+    }
+
+
+@patch(
+    "basic_memory.cli.commands.tool.mcp_schema_validate",
+    new_callable=AsyncMock,
+)
+def test_schema_validate_directory_recursive(mock_mcp, tmp_path):
+    """Passing a directory walks .md files recursively and aggregates per-file reports."""
+    # tree: tmp/root/a.md  tmp/root/sub/b.md  tmp/root/sub/c.md
+    root = tmp_path / "root"
+    (root / "sub").mkdir(parents=True)
+    (root / "a.md").write_text("---\ntype: task\n---\n# A")
+    (root / "sub" / "b.md").write_text("---\ntype: task\n---\n# B")
+    (root / "sub" / "c.md").write_text("---\ntype: task\n---\n# C")
+
+    mock_mcp.side_effect = lambda **kw: _per_file_validate_result(kw["identifier"])
+
+    result = runner.invoke(cli_app, ["tool", "schema-validate", str(root)])
+
+    assert result.exit_code == 0, f"CLI failed: {result.output}"
+    data = json.loads(result.output)
+    assert data["files_walked"] == 3
+    assert data["total_notes"] == 3
+    assert data["valid_count"] == 0
+    assert data["error_count"] == 3
+    assert data["recursive"] is True
+    # Each per-file call should have used identifier=<absolute path to .md>
+    assert mock_mcp.call_count == 3
+    identifiers = [call.kwargs["identifier"] for call in mock_mcp.call_args_list]
+    assert all(i.endswith(".md") for i in identifiers)
+
+
+@patch(
+    "basic_memory.cli.commands.tool.mcp_schema_validate",
+    new_callable=AsyncMock,
+)
+def test_schema_validate_directory_no_recursive(mock_mcp, tmp_path):
+    """--no-recursive limits the walk to immediate-children .md files."""
+    root = tmp_path / "root"
+    (root / "sub").mkdir(parents=True)
+    (root / "a.md").write_text("---\ntype: task\n---\n# A")
+    (root / "sub" / "b.md").write_text("---\ntype: task\n---\n# B")
+
+    mock_mcp.side_effect = lambda **kw: _per_file_validate_result(kw["identifier"])
+
+    result = runner.invoke(
+        cli_app, ["tool", "schema-validate", str(root), "--no-recursive"]
+    )
+
+    assert result.exit_code == 0, f"CLI failed: {result.output}"
+    data = json.loads(result.output)
+    assert data["files_walked"] == 1
+    assert data["recursive"] is False
+    assert mock_mcp.call_count == 1
+
+
+@patch(
+    "basic_memory.cli.commands.tool.mcp_schema_validate",
+    new_callable=AsyncMock,
+)
+def test_schema_validate_directory_skips_unresolvable(mock_mcp, tmp_path):
+    """Per-file errors land in `skipped`, not in `results`."""
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "a.md").write_text("---\ntype: task\n---\n# A")
+    (root / "b.md").write_text("---\ntype: task\n---\n# B")
+
+    def per_file(**kw):
+        if kw["identifier"].endswith("b.md"):
+            return {"error": "No notes found of type 'unknown'"}
+        return _per_file_validate_result(kw["identifier"])
+
+    mock_mcp.side_effect = per_file
+
+    result = runner.invoke(cli_app, ["tool", "schema-validate", str(root)])
+
+    assert result.exit_code == 0, f"CLI failed: {result.output}"
+    data = json.loads(result.output)
+    assert data["total_notes"] == 1
+    assert len(data["skipped"]) == 1
+    assert "b.md" in data["skipped"][0]
+
+
 # --- schema-infer ---
 
 SCHEMA_INFER_RESULT = {

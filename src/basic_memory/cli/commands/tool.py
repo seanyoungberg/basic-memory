@@ -6,6 +6,7 @@ No text formatting, no separate code paths, no duplicate data fetching.
 
 import json
 import sys
+from pathlib import Path
 from typing import Annotated, Any, Dict, List, Optional
 
 import typer
@@ -604,7 +605,7 @@ def list_workspaces(
 def schema_validate(
     target: Annotated[
         Optional[str],
-        typer.Argument(help="Note path or note type to validate"),
+        typer.Argument(help="Note path, note type, or directory of notes to validate"),
     ] = None,
     project: Annotated[
         Optional[str],
@@ -621,20 +622,47 @@ def schema_validate(
         False, "--local", help="Force local API routing (ignore cloud mode)"
     ),
     cloud: bool = typer.Option(False, "--cloud", help="Force cloud API routing"),
+    recursive: bool = typer.Option(
+        True,
+        "--recursive/--no-recursive",
+        "-r",
+        help="When TARGET is a directory, walk subdirectories (default: on)",
+    ),
 ):
     """Validate notes against their schemas (JSON output).
 
-    TARGET can be a note path (e.g., people/ada-lovelace.md) or a note type
-    (e.g., person). If omitted, validates all notes that have schemas.
+    TARGET can be:
+      - a note type (e.g., person) — validates all notes of that type
+      - a note path (e.g., people/ada-lovelace.md) — validates a single note
+      - a directory (e.g., domains/foo/) — validates every .md file under it
+
+    Directory mode aggregates per-file ValidationReports into a single report
+    so the JSON shape stays consistent with single-note / by-type validation.
 
     Examples:
 
     bm tool schema-validate person
     bm tool schema-validate people/ada-lovelace.md
-    bm tool schema-validate --project research
+    bm tool schema-validate domains/foo/
+    bm tool schema-validate domains/foo/ --no-recursive
     """
     try:
         validate_routing_flags(local, cloud)
+
+        # Directory mode: walk .md files and aggregate per-file reports.
+        # The MCP layer's identifier path is single-note (link_resolver.resolve_link),
+        # so passing a directory used to fuzzy-match exactly one arbitrary note —
+        # silently ignoring everything else under the tree.
+        target_path = Path(target) if target else None
+        if target_path and target_path.is_dir():
+            with force_routing(local=local, cloud=cloud):
+                aggregated = _validate_directory(
+                    target_path,
+                    recursive=recursive,
+                    project=project,
+                )
+            _print_json(aggregated)
+            return
 
         # Heuristic: if target contains / or ., treat as identifier; otherwise as note type
         note_type, identifier = None, None
@@ -663,6 +691,69 @@ def schema_validate(
             typer.echo(f"Error during schema_validate: {e}", err=True)
             raise typer.Exit(1)
         raise
+
+
+def _validate_directory(
+    directory: Path,
+    *,
+    recursive: bool,
+    project: Optional[str],
+) -> Dict[str, Any]:
+    """Walk a directory of .md files, validate each, aggregate the reports."""
+    pattern = "**/*.md" if recursive else "*.md"
+    files = sorted(p for p in directory.glob(pattern) if p.is_file())
+
+    aggregated_results: List[Any] = []
+    total_entities = 0
+    skipped: List[str] = []
+
+    for f in files:
+        # The MCP layer accepts vault-relative paths via its link resolver, which
+        # tries permalink → title → file path. Pass the path as-given (user's CWD)
+        # which mirrors how the existing single-file path heuristic works today.
+        identifier = str(f)
+        try:
+            result = run_with_cleanup(
+                mcp_schema_validate(
+                    note_type=None,
+                    identifier=identifier,
+                    project=project,
+                    output_format="json",
+                )
+            )
+        except Exception as e:  # pragma: no cover
+            skipped.append(f"{identifier}: {e}")
+            continue
+
+        if isinstance(result, dict) and "error" in result:
+            skipped.append(f"{identifier}: {result['error']}")
+            continue
+
+        if not isinstance(result, dict):
+            skipped.append(f"{identifier}: unexpected result shape")
+            continue
+
+        total_entities += int(result.get("total_entities", 0))
+        for r in result.get("results", []) or []:
+            aggregated_results.append(r)
+
+    valid_count = sum(1 for r in aggregated_results if r.get("passed"))
+    warning_count = sum(len(r.get("warnings") or []) for r in aggregated_results)
+    error_count = sum(len(r.get("errors") or []) for r in aggregated_results)
+
+    return {
+        "note_type": None,
+        "directory": str(directory),
+        "recursive": recursive,
+        "files_walked": len(files),
+        "total_entities": total_entities,
+        "total_notes": len(aggregated_results),
+        "valid_count": valid_count,
+        "warning_count": warning_count,
+        "error_count": error_count,
+        "skipped": skipped,
+        "results": aggregated_results,
+    }
 
 
 # --- schema-infer ---
